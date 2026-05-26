@@ -1,0 +1,45 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+html, body {
+  background: #f7f6f1;
+  color: #1f2c5b;
+}
+
+/* -------------------------------------------------------------------------
+ * 印刷時のレイアウト (A4 縦・10mm マージン・印刷ボタン非表示)
+ * `.print-hidden` を付けた要素は印刷紙面に出ない。
+ * ------------------------------------------------------------------------- */
+@media print {
+  @page {
+    size: A4 portrait;
+    margin: 10mm;
+  }
+
+  html, body {
+    background: #ffffff !important;
+    color: #000000 !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+    zoom: 0.68;
+  }
+
+  .print-hidden {
+    display: none !important;
+  }
+
+  .print-page {
+    width: 190mm;          /* A4幅 210mm - margin 10mm × 2 */
+    page-break-after: always;
+  }
+
+  .print-keep-color {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+}
