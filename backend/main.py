@@ -11,20 +11,26 @@
   POST /api/scan                画像スキャン → 回答・ステータス返却（保存なし）
   POST /api/debug/scan          デバッグ用：アノテーション画像 + バブル充填率
   POST /api/print/{result_id}   結果ページを印刷（Chrome headless + lpr）
+                                クエリパラメータ: station=1 or 2
 
 実行: .venv/bin/uvicorn main:app --reload --port 8000
 """
 from __future__ import annotations
+import os
+import os
+import os
+import os
 
 from contextlib import asynccontextmanager
 from typing import List, Optional
 
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 import omr
 import printer
+from printer import generate_pdf_background
 import scoring
 import sheet
 
@@ -75,10 +81,12 @@ class ScanRequest(BaseModel):
 
 
 class ScanResponse(BaseModel):
+    marks_found: bool = False
     answers: List[Optional[str]]
     statuses: List[str]
     question_count: int
     error: Optional[str] = None
+    number_answers: dict = {}
 
 
 class DebugScanResponse(BaseModel):
@@ -130,16 +138,44 @@ def submit(req: SubmitRequest) -> SubmitResponse:
             status_code=400,
             detail=f"answers の長さが不正です（期待 {expected_n}, 実際 {len(req.answers)}）",
         )
+    # 数字記入問題のIDを取得
+    number_question_ids = {
+        q["id"] for q in scoring.load_active_questions()
+        if q.get("input_type") == "number"
+    }
+    active_ids = scoring.load_active_ids()
+
+    number_answers = {}
     for i, ans in enumerate(req.answers):
-        if ans is not None and ans not in ("A", "B", "C", "D"):
+        if ans is None:
+            continue
+        qid = active_ids[i] if i < len(active_ids) else None
+        if qid in number_question_ids:
+            # 数字記入問題：数値文字列を検証
+            try:
+                n = int(ans)
+                if not (1 <= n <= 30):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"answers[{i}] の数値が範囲外です: {ans!r}",
+                    )
+                number_answers[qid] = n
+            except ValueError:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"answers[{i}] が不正な値です: {ans!r}",
+                )
+        elif ans not in ("A", "B", "C", "D"):
             raise HTTPException(
                 status_code=400,
                 detail=f"answers[{i}] が不正な値です: {ans!r}",
             )
     try:
-        result_id = scoring.submit_answers(req.answers)
+        result_id = scoring.submit_answers(req.answers, number_answers or None)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    # バックグラウンドでPDFを事前生成
+    generate_pdf_background(result_id, os.environ.get("FRONTEND_BASE_URL", "http://localhost:3000"))
     return SubmitResponse(result_id=result_id)
 
 
@@ -192,7 +228,11 @@ def scan(req: ScanRequest) -> ScanResponse:
     """画像から回答配列を読み取る（保存しない）。"""
     question_count = len(scoring.load_active_ids())
     try:
-        result = omr.process_image(_strip_data_url_prefix(req.image))
+        import base64 as _b64
+        _raw = _strip_data_url_prefix(req.image)
+        with open('/tmp/last_scan.jpg', 'wb') as _f:
+            _f.write(_b64.b64decode(_raw))
+        result = omr.process_image(_raw)
     except Exception as e:
         return ScanResponse(
             answers=[None] * question_count,
@@ -211,7 +251,19 @@ def scan(req: ScanRequest) -> ScanResponse:
         answers=result.answers,
         statuses=result.statuses,
         question_count=result.question_count,
+        number_answers=result.number_answers,
+        marks_found=result.error != "基準マーク未検出",
     )
+
+
+@app.post("/api/detect")
+def detect(req: ScanRequest) -> dict:
+    """軽量判定：マークシートの4隅マーカーが揃っているかだけ返す（自動撮影用）。"""
+    try:
+        found = omr.detect_marks_only(_strip_data_url_prefix(req.image))
+        return {"marks_found": bool(found)}
+    except Exception:
+        return {"marks_found": False}
 
 
 @app.post("/api/debug/scan")
@@ -228,12 +280,19 @@ def debug_scan(req: ScanRequest) -> dict:
 # ---------------------------------------------------------------------------
 
 @app.post("/api/print/{result_id}")
-def print_result(result_id: str) -> dict:
-    """結果ページを Chrome headless で PDF 化 → lpr で印刷キューに送る。"""
+def print_result(
+    result_id: str,
+    station: int = Query(default=1, ge=1, le=3, description="印刷先のstation番号（1 or 2）"),
+) -> dict:
+    """結果ページを Chrome headless で PDF 化 → lpr で印刷キューに送る。
+    
+    station=1 → PRINTER_1（iPad①の隣のプリンター）
+    station=2 → PRINTER_2（iPad②の隣のプリンター）
+    """
     if scoring.get_result(result_id) is None:
         raise HTTPException(status_code=404, detail="result_id が見つかりません")
     try:
-        result = printer.print_result(result_id)
-        return result if isinstance(result, dict) else {"status": "ok"}
+        printer.print_result(result_id, frontend_base=os.environ.get("FRONTEND_BASE_URL", "http://localhost:3000"), station=station)
+        return {"status": "ok", "station": station}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

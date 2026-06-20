@@ -8,16 +8,15 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        // はてな展のキーカラー(紺)
+        // はてな展のキーカラー(ピンク)
         navy: {
-          DEFAULT: '#1f2c5b',
-          deep:    '#142046',
-          light:   '#3a4a85',
+          DEFAULT: '#FF4DA6',
+          deep:    '#E0358A',
+          light:   '#FF80C0',
         },
         cream: '#f8f4e8',
       },
       fontFamily: {
-        // Mac の日本語フォントを優先(印刷時 sheet.py と揃える)。
         sans: [
           '"Hiragino Sans"',
           '"Hiragino Kaku Gothic ProN"',

@@ -1,155 +1,88 @@
-/**
- * 5軸スコア(0〜100)のレーダーチャート。
- *
- * 表示順: 社交度 / 心の広さ度 / 怠惰度 / 自分大切度 / ロジカル度
- *
- * `display_scores` をそのまま渡せば動作する(行動軸は backend 側で既に
- * 100-action へ反転済み)。
- */
+'use client';
+
+import React from 'react';
 
 interface Props {
-  /** ラベル → スコア(0〜100) の連想。 */
   scores: Record<string, number>;
-  /** 表示順。省略時はデフォルト5軸。 */
-  order?: string[];
-  /** SVG サイズ(正方形)。 */
   size?: number;
 }
 
-const DEFAULT_ORDER = ['社交度', '心の広さ度', '怠惰度', '自分大切度', 'ロジカル度'];
+const AXES = [
+  { id: 'tolerance', label: '心の広さ度', left: 'せまい',     right: '広い',       angle: -90,  labelPos: 'top'   },
+  { id: 'social',    label: '社交度',     left: 'ひとり派',   right: '社交的',     angle: -18,  labelPos: 'right' },
+  { id: 'action',    label: '怠惰度',     left: 'シャキシャキ', right: 'ぐうたら',   angle:  54,  labelPos: 'br'    },
+  { id: 'logical',   label: 'ロジカル度', left: '感情派',     right: 'ロジカル派', angle: 126,  labelPos: 'bl'    },
+  { id: 'self',      label: '自分大切度', left: '自己犠牲',   right: '自分優先',   angle: 198,  labelPos: 'left'  },
+] as const;
 
-export default function ScoreRadar({
-  scores,
-  order = DEFAULT_ORDER,
-  size = 320,
-}: Props) {
-  const labels = order;
-  const n = labels.length;
-  const cx = size / 2;
-  const cy = size / 2;
-  const radius = size * 0.38;
+const PINK = '#E8769F';
+const PINK_GRID = '#F6C9D9';
+const PINK_FILL = 'rgba(232,118,159,0.28)';
 
-  // 各軸の方向ベクトル(上を 0°、時計回り)
-  const angle = (i: number) => (i / n) * Math.PI * 2 - Math.PI / 2;
+export default function ScoreRadar({ scores, size = 95 }: Props) {
+  const padX = 78;
+  const padY = 82;
+  const cx = size / 2 + padX;
+  const cy = size / 2 + padY;
+  const r = size / 2;
+  const totalW = size + padX * 2;
+  const totalH = size + padY * 2;
 
-  // 軸線・グリッドの座標
-  const axisPoints = labels.map((_, i) => ({
-    x: cx + Math.cos(angle(i)) * radius,
-    y: cy + Math.sin(angle(i)) * radius,
-  }));
+  function pt(angle: number, radius: number): [number, number] {
+    const rad = (angle * Math.PI) / 180;
+    return [cx + radius * Math.cos(rad), cy + radius * Math.sin(rad)];
+  }
 
-  // 同心五角形のグリッド(20/40/60/80/100)
-  const grids = [0.2, 0.4, 0.6, 0.8, 1.0].map((r) =>
-    labels
-      .map((_, i) => {
-        const x = cx + Math.cos(angle(i)) * radius * r;
-        const y = cy + Math.sin(angle(i)) * radius * r;
-        return `${x.toFixed(1)},${y.toFixed(1)}`;
-      })
-      .join(' '),
-  );
-
-  // データポリゴン
-  const dataPath = labels
-    .map((label, i) => {
-      const v = Math.max(0, Math.min(100, scores[label] ?? 0)) / 100;
-      const x = cx + Math.cos(angle(i)) * radius * v;
-      const y = cy + Math.sin(angle(i)) * radius * v;
-      return `${x.toFixed(1)},${y.toFixed(1)}`;
-    })
-    .join(' ');
-
-  // ラベル位置(軸頂点の少し外側)
-  const labelPositions = labels.map((_, i) => {
-    const r = radius + 22;
-    return {
-      x: cx + Math.cos(angle(i)) * r,
-      y: cy + Math.sin(angle(i)) * r,
-    };
+  const gridLevels = [0.25, 0.5, 0.75, 1.0];
+  const dataPoints = AXES.map((ax) => {
+    const score = scores[ax.label] ?? 50;
+    const ratio = Math.min(Math.max(score, 0), 100) / 100;
+    return pt(ax.angle, r * ratio);
   });
+  const dataPath = dataPoints.map((p, i) => `${i === 0 ? 'M' : 'L'}${p[0]},${p[1]}`).join(' ') + ' Z';
 
   return (
     <svg
-      xmlns="http://www.w3.org/2000/svg"
-      viewBox={`0 0 ${size} ${size}`}
-      width={size}
-      height={size}
-      role="img"
-      aria-label="5軸スコアレーダーチャート"
-      className="print-keep-color"
+      width={totalW}
+      height={totalH}
+      viewBox={`0 0 ${totalW} ${totalH}`}
+      style={{ display: 'block', margin: '0 auto', overflow: 'visible' }}
     >
-      {/* グリッド */}
-      {grids.map((points, i) => (
-        <polygon
-          key={i}
-          points={points}
-          fill="none"
-          stroke="#c8c4b4"
-          strokeWidth={i === grids.length - 1 ? 1.5 : 0.8}
-        />
-      ))}
+      <text x={cx} y={cy + r * 0.55} textAnchor="middle" fontSize={r * 2.2} fill="#FBE3EC" fontWeight={900} style={{ opacity: 0.5 }}>?</text>
 
-      {/* 軸線 */}
-      {axisPoints.map((p, i) => (
-        <line
-          key={i}
-          x1={cx}
-          y1={cy}
-          x2={p.x}
-          y2={p.y}
-          stroke="#c8c4b4"
-          strokeWidth={0.8}
-        />
-      ))}
-
-      {/* データポリゴン */}
-      <polygon
-        points={dataPath}
-        fill="#1f2c5b"
-        fillOpacity={0.22}
-        stroke="#1f2c5b"
-        strokeWidth={2.2}
-        strokeLinejoin="round"
-      />
-
-      {/* データ頂点ドット */}
-      {labels.map((label, i) => {
-        const v = Math.max(0, Math.min(100, scores[label] ?? 0)) / 100;
-        const x = cx + Math.cos(angle(i)) * radius * v;
-        const y = cy + Math.sin(angle(i)) * radius * v;
-        return (
-          <circle key={i} cx={x} cy={y} r={3.5} fill="#1f2c5b" />
-        );
+      {gridLevels.map((level) => {
+        const pts = AXES.map((ax) => pt(ax.angle, r * level));
+        const d = pts.map((p, i) => `${i === 0 ? 'M' : 'L'}${p[0]},${p[1]}`).join(' ') + ' Z';
+        return <path key={level} d={d} fill="none" stroke={PINK_GRID} strokeWidth={1.2} />;
       })}
 
-      {/* ラベル + 値 */}
-      {labels.map((label, i) => {
-        const p = labelPositions[i];
-        const v = Math.round(scores[label] ?? 0);
-        const anchor =
-          Math.abs(p.x - cx) < 1 ? 'middle' : p.x < cx ? 'end' : 'start';
+      {AXES.map((ax) => {
+        const [x, y] = pt(ax.angle, r);
+        return <line key={ax.id} x1={cx} y1={cy} x2={x} y2={y} stroke={PINK_GRID} strokeWidth={1.2} />;
+      })}
+
+      <path d={dataPath} fill={PINK_FILL} stroke={PINK} strokeWidth={2} strokeLinejoin="round" />
+      {dataPoints.map(([x, y], i) => (
+        <circle key={i} cx={x} cy={y} r={3} fill={PINK} />
+      ))}
+
+      {AXES.map((ax) => {
+        const score = Math.round(scores[ax.label] ?? 50);
+        const [ix, iy] = pt(ax.angle, r + 40);
+        let tx = ix, ty = iy;
+        const anchor: 'start' | 'middle' | 'end' = 'middle';
+        if (ax.labelPos === 'top') ty = iy - 4;
+        else if (ax.labelPos === 'right') { tx = ix + 24; }
+        else if (ax.labelPos === 'br') ty = iy + 6;
+        else if (ax.labelPos === 'bl') ty = iy + 6;
+
         return (
-          <g key={i} fontFamily="inherit">
-            <text
-              x={p.x}
-              y={p.y - 4}
-              textAnchor={anchor}
-              fontSize={12}
-              fontWeight={700}
-              fill="#1f2c5b"
-            >
-              {label}
-            </text>
-            <text
-              x={p.x}
-              y={p.y + 10}
-              textAnchor={anchor}
-              fontSize={11}
-              fill="#1f2c5b"
-              opacity={0.75}
-            >
-              {v}
-            </text>
+          <g key={ax.id}>
+            <image href={`/axis_icons/${ax.id}.png`} x={ix - 20} y={iy - 42} width={40} height={40} preserveAspectRatio="xMidYMid meet" />
+            <text x={tx} y={ty + 6} textAnchor={anchor} fontSize={13} fill={PINK} fontWeight={900}>{ax.label}</text>
+            <text x={tx} y={ty + 21} textAnchor={anchor} fontSize={8.5} fill="#AAAAAA">{ax.left} ← → {ax.right}</text>
+            <text x={tx} y={ty + 52} textAnchor={anchor} fontSize={34} fill={PINK} fontWeight={900}>{score}</text>
+            <text x={tx} y={ty + 68} textAnchor={anchor} fontSize={8} fill="#BBBBBB">(0 ← → 100)</text>
           </g>
         );
       })}

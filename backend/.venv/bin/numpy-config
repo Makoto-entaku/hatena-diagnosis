@@ -1,4 +1,4 @@
-#!/Users/kota_ando/exhibition-diagnostic/backend/.venv/bin/python3
+#!/Users/makotokishihara/Downloads/hatena_diagnosis_202606/backend/.venv/bin/python3
 # -*- coding: utf-8 -*-
 import re
 import sys

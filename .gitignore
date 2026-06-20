@@ -1,0 +1,18 @@
+# Python
+backend/.venv/
+**/__pycache__/
+**/*.pyc
+backend/nohup.out
+
+# DB（来場者データ含むため除外）
+data/results.db
+
+# Node
+frontend/node_modules/
+frontend/.next/
+
+# SSL証明書（マシン固有）
+frontend/*.pem
+
+# OS
+.DS_Store

@@ -13,10 +13,11 @@ import { api, ApiError } from '@/lib/api';
 import { cx } from '@/lib/utils';
 
 interface Props {
+  station?: number;
   resultId: string;
 }
 
-export default function PrintButton({ resultId }: Props) {
+export default function PrintButton({ resultId, station = 1 }: Props) {
   const [status, setStatus] = useState<'idle' | 'sending' | 'ok' | 'error'>(
     'idle',
   );
@@ -36,7 +37,7 @@ export default function PrintButton({ resultId }: Props) {
     setStatus('sending');
     setMessage(null);
     try {
-      await api.print(resultId);
+      await api.print(resultId, station);
       setStatus('ok');
       setMessage('プリンタに送りました');
     } catch (e: unknown) {

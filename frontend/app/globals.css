@@ -11,14 +11,10 @@ html, body {
   color: #1f2c5b;
 }
 
-/* -------------------------------------------------------------------------
- * 印刷時のレイアウト (A4 縦・10mm マージン・印刷ボタン非表示)
- * `.print-hidden` を付けた要素は印刷紙面に出ない。
- * ------------------------------------------------------------------------- */
 @media print {
   @page {
-    size: A4 portrait;
-    margin: 10mm;
+    size: 148mm 210mm;
+    margin: 4mm;
   }
 
   html, body {
@@ -26,16 +22,21 @@ html, body {
     color: #000000 !important;
     -webkit-print-color-adjust: exact;
     print-color-adjust: exact;
-    zoom: 0.68;
+  }
+
+  /* 印刷時：カード全体を1ページに収めるため上部ラベルを隠し余白ゼロ */
+  body > div > p:first-child {
+    display: none !important;
+  }
+  body > div {
+    padding: 0 !important;
+  }
+  article {
+    margin: 0 auto !important;
   }
 
   .print-hidden {
     display: none !important;
-  }
-
-  .print-page {
-    width: 190mm;          /* A4幅 210mm - margin 10mm × 2 */
-    page-break-after: always;
   }
 
   .print-keep-color {

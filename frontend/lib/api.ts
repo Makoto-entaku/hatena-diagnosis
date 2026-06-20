@@ -75,6 +75,13 @@ export const api = {
       body: JSON.stringify({ image: imageDataUrl }),
     }),
 
+  /** 軽量判定：マーカーが揃っているかだけ確認（自動撮影用）。 */
+  detect: (imageDataUrl: string) =>
+    request<{ marks_found: boolean }>('/api/detect', {
+      method: 'POST',
+      body: JSON.stringify({ image: imageDataUrl }),
+    }),
+
   /** デバッグ用スキャン。 */
   debugScan: (imageDataUrl: string) =>
     request<DebugScanResponse>('/api/debug/scan', {
@@ -83,10 +90,10 @@ export const api = {
     }),
 
   /** 回答を確定して保存。 */
-  submit: (answers: Answer[]) =>
+  submit: (answers: Answer[], number_answers?: Record<string, number>) =>
     request<SubmitResponse>('/api/submit', {
       method: 'POST',
-      body: JSON.stringify({ answers }),
+      body: JSON.stringify({ answers, number_answers }),
     }),
 
   /** 結果取得(SSR からも使う)。 */
@@ -94,9 +101,9 @@ export const api = {
     request<ResultResponse>(`/api/result/${encodeURIComponent(id)}`),
 
   /** 印刷キューに送る。 */
-  print: (id: string) =>
+  print: (id: string, station: number = 1) =>
     request<{ status?: string; [k: string]: unknown }>(
-      `/api/print/${encodeURIComponent(id)}`,
+      `/api/print/${encodeURIComponent(id)}?station=${station}`,
       { method: 'POST' },
     ),
 };

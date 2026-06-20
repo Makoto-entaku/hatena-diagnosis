@@ -44,7 +44,7 @@ def load_active_ids() -> List[str]:
     """active.json から有効な問いIDの順序リストを返す。"""
     with open(_ACTIVE_PATH, encoding="utf-8") as f:
         data = json.load(f)
-    return list(data["active_ids"])
+    return list(data.get("active_ids", data.get("active_questions", [])))
 
 
 def load_types_config() -> dict:
@@ -63,6 +63,23 @@ def load_active_questions() -> List[dict]:
 # スコア計算
 # ---------------------------------------------------------------------------
 
+def number_to_zone(n: int, number_range: list = None) -> str:
+    """数字をlow/mid/highゾーンに変換する。
+    number_rangeが指定された場合はそのrangeを3等分して相対判定する。
+    """
+    if number_range is None:
+        if n <= 10: return 'low'
+        elif n <= 20: return 'mid'
+        else: return 'high'
+    lo, hi = number_range[0], number_range[1]
+    span = hi - lo + 1
+    third = span / 3
+    pos = n - lo
+    if pos < third: return 'low'
+    elif pos < third * 2: return 'mid'
+    else: return 'high'
+
+
 def compute_raw_scores(answers: List[Optional[str]]) -> Dict[str, float]:
     """
     回答配列を軸ごとの生スコアに集計する。
@@ -80,7 +97,17 @@ def compute_raw_scores(answers: List[Optional[str]]) -> Dict[str, float]:
     for question, ans in zip(active_questions, answers):
         if ans is None:
             continue
-        delta = question["scoring"].get(ans, {})
+        if question.get("input_type") == "number":
+            # 数字記入問題：数値をゾーンに変換してスコアを取得
+            try:
+                n = int(ans)
+                nr = question.get("number_range")
+                zone = number_to_zone(n, nr)
+                delta = question["scoring"].get(zone, {})
+            except (ValueError, TypeError):
+                continue
+        else:
+            delta = question["scoring"].get(ans, {})
         for axis, value in delta.items():
             raw[axis] = raw.get(axis, 0.0) + float(value)
     return raw
@@ -203,14 +230,20 @@ def init_db() -> None:
         con.execute(
             """
             CREATE TABLE IF NOT EXISTS results (
-                id         TEXT PRIMARY KEY,
-                created_at TEXT NOT NULL,
-                answers    TEXT NOT NULL,
-                scores     TEXT NOT NULL,
-                type_id    TEXT NOT NULL
+                id             TEXT PRIMARY KEY,
+                created_at     TEXT NOT NULL,
+                answers        TEXT NOT NULL,
+                scores         TEXT NOT NULL,
+                type_id        TEXT NOT NULL,
+                number_answers TEXT
             )
             """
         )
+        # 既存DBへのカラム追加（初回のみ実行される）
+        try:
+            con.execute("ALTER TABLE results ADD COLUMN number_answers TEXT")
+        except sqlite3.OperationalError:
+            pass  # すでにカラムがある場合はスキップ
         con.commit()
     finally:
         con.close()
@@ -220,6 +253,7 @@ def save_result(
     answers: List[Optional[str]],
     normalized_scores: Dict[str, float],
     type_code: str,
+    number_answers: Optional[Dict[str, int]] = None,
 ) -> str:
     """結果を保存し、result_id (UUIDv4文字列) を返す。"""
     init_db()
@@ -228,19 +262,80 @@ def save_result(
     con = sqlite3.connect(DB_PATH)
     try:
         con.execute(
-            "INSERT INTO results (id, created_at, answers, scores, type_id) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO results (id, created_at, answers, scores, type_id, number_answers) VALUES (?, ?, ?, ?, ?, ?)",
             (
                 result_id,
                 created_at,
                 json.dumps(answers, ensure_ascii=False),
                 json.dumps(normalized_scores, ensure_ascii=False),
                 type_code,
+                json.dumps(number_answers, ensure_ascii=False) if number_answers else None,
             ),
         )
         con.commit()
     finally:
         con.close()
     return result_id
+
+
+def _fetch_answer_distributions() -> Dict[str, Dict[str, float]]:
+    """全回答から各問の選択肢比率を計算する。{q_idx: {answer: ratio}}"""
+    init_db()
+    con = sqlite3.connect(DB_PATH)
+    try:
+        rows = con.execute("SELECT answers FROM results").fetchall()
+    finally:
+        con.close()
+    if not rows:
+        return {}
+
+    counts: Dict[int, Dict[str, int]] = {}
+    totals: Dict[int, int] = {}
+
+    for (answers_json,) in rows:
+        answers = json.loads(answers_json)
+        for i, ans in enumerate(answers):
+            if ans is None:
+                continue
+            counts.setdefault(i, {})
+            counts[i][ans] = counts[i].get(ans, 0) + 1
+            totals[i] = totals.get(i, 0) + 1
+
+    result = {}
+    for i, ans_counts in counts.items():
+        total = totals[i]
+        result[i] = {ans: count / total for ans, count in ans_counts.items()}
+    return result
+
+
+def _fetch_answer_distributions() -> Dict[str, Dict[str, float]]:
+    """全回答から各問の選択肢比率を計算する。{q_idx: {answer: ratio}}"""
+    init_db()
+    con = sqlite3.connect(DB_PATH)
+    try:
+        rows = con.execute("SELECT answers FROM results").fetchall()
+    finally:
+        con.close()
+    if not rows:
+        return {}
+
+    counts: Dict[int, Dict[str, int]] = {}
+    totals: Dict[int, int] = {}
+
+    for (answers_json,) in rows:
+        answers = json.loads(answers_json)
+        for i, ans in enumerate(answers):
+            if ans is None:
+                continue
+            counts.setdefault(i, {})
+            counts[i][ans] = counts[i].get(ans, 0) + 1
+            totals[i] = totals.get(i, 0) + 1
+
+    result = {}
+    for i, ans_counts in counts.items():
+        total = totals[i]
+        result[i] = {ans: count / total for ans, count in ans_counts.items()}
+    return result
 
 
 def _fetch_axis_means() -> Dict[str, float]:
@@ -291,6 +386,35 @@ def get_result(result_id: str) -> Optional[dict]:
 
     questions = load_active_questions()
 
+    # ちょっと変だった回答（少数派TOP3）
+    distributions = _fetch_answer_distributions()
+    weird_answers = []
+    for i, ans in enumerate(raw_answers):
+        # null（読み取れなかった問い）は除外
+        if ans is None:
+            continue
+        dist = distributions.get(i, {})
+        ratio = dist.get(ans, 1.0)
+        if ratio < 0.3 and i < len(questions):
+            q = questions[i]
+            options = q.get("options", {})
+            # 数字記入問題は「〇番」という形式で表示
+            if q.get("input_type") == "number":
+                answer_label = f"{ans}番"
+            elif isinstance(options, dict):
+                answer_label = options.get(ans, ans)
+            else:
+                answer_label = ans
+            weird_answers.append({
+                "question_summary": q["text"],
+                "answer": ans,
+                "answer_label": answer_label,
+                "ratio": round(ratio * 100),
+            })
+
+    weird_answers.sort(key=lambda x: x["ratio"])
+    weird_answers = weird_answers[:3]
+
     return {
         "result_id": rid,
         "created_at": created_at,
@@ -301,6 +425,8 @@ def get_result(result_id: str) -> Optional[dict]:
         "description": type_info.get("description", ""),
         "tendency": type_info.get("tendency", ""),
         "advice": type_info.get("advice", ""),
+        "suited": type_info.get("suited", ""),
+        "strength": type_info.get("strength", ""),
         "scores": {k: round(v, 1) for k, v in normalized_scores.items()},
         "display_scores": compute_display_scores(normalized_scores),
         "raw_answers": raw_answers,
@@ -308,12 +434,13 @@ def get_result(result_id: str) -> Optional[dict]:
             {
                 "id": q["id"],
                 "text": q["text"],
-                "summary": q.get("summary", q["text"]),
+                "summary": q["text"],
                 "options": q["options"],
             }
             for q in questions
         ],
         "axis_comparisons": axis_comparisons,
+        "weird_answers": weird_answers,
     }
 
 
@@ -321,11 +448,14 @@ def get_result(result_id: str) -> Optional[dict]:
 # 統合エントリーポイント
 # ---------------------------------------------------------------------------
 
-def submit_answers(answers: List[Optional[str]]) -> str:
+def submit_answers(
+    answers: List[Optional[str]],
+    number_answers: Optional[Dict[str, int]] = None,
+) -> str:
     """回答を受け取り、スコア計算・タイプ判定・保存をして result_id を返す。"""
     normalized_scores = compute_normalized_scores(answers)
     type_code = determine_type_code(normalized_scores)
-    return save_result(answers, normalized_scores, type_code)
+    return save_result(answers, normalized_scores, type_code, number_answers)
 
 
 def list_results(limit: int = 100) -> List[dict]:
