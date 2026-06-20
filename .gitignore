@@ -1,11 +1,23 @@
-# Python
+# Python venv
 backend/.venv/
 **/__pycache__/
 **/*.pyc
 backend/nohup.out
+backend/Ready
 
-# DB（来場者データ含むため除外）
+# DB
 data/results.db
+
+# 環境変数（IPやプリンター名が含まれる）
+.env.production
+backend/.env.production
+
+# バックアップ・旧ファイル
+backend/omr_OLD.py
+frontend/components/CameraView_OLD.tsx
+frontend/components/ResultCard.tsx.bak
+data/*.bak
+data/*.bak2
 
 # Node
 frontend/node_modules/
