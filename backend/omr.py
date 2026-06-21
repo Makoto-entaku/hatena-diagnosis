@@ -102,6 +102,95 @@ STATUS_UNCLEAR = "unclear"  # 判定不能
 DATA_DIR = Path(__file__).parent.parent / "data"
 
 
+# ── 什器キャリブレーション設定 ───────────────────────────────────────────────
+# 固定什器(キオスク)では距離・角度・照明がほぼ一定になるため、一度合わせ込めば
+# その状態が再現される。現場ではコードを触らず data/omr_calib.json の数値だけを
+# 変えて微調整できる。ファイルが無ければ下の既定値で動作する。
+#
+# omr_calib.json の例:
+#   {
+#     "offset_dx_px": 0,        # 全バブル座標を横にずらす(px)。什器で系統的に右へずれるなら負、左なら正
+#     "offset_dy_px": 0,        # 縦にずらす(px)
+#     "search_radius_px": 4,    # バブル中心の周辺探索半径(px)。0で探索なし。微小ズレ吸収用
+#     "fill_blank_max": 0.30,   # これ未満なら未回答
+#     "fill_detect_min": 0.35,  # これ以上かつ差が十分なら確定
+#     "fill_diff_min": 0.15,    # 1位と2位の塗り差の最小値
+#     "fill_multi_min": 0.40    # 2位がこれ以上なら複数回答疑い
+#   }
+CALIB = {
+    "offset_dx_px": 0,
+    "offset_dy_px": 0,
+    "search_radius_px": 4,
+    "fill_inner_scale": FILL_INNER_SCALE,
+    "fill_blank_max": FILL_BLANK_MAX,
+    "fill_detect_min": FILL_DETECT_MIN,
+    "fill_diff_min": FILL_DIFF_MIN,
+    "fill_multi_min": FILL_MULTI_MIN,
+}
+
+
+def _load_calib() -> None:
+    """data/omr_calib.json があれば読み込み、CALIB と判定しきい値を上書きする。"""
+    try:
+        p = DATA_DIR / "omr_calib.json"
+        if p.exists():
+            with open(p, encoding="utf-8") as f:
+                user_calib = json.load(f)
+            if isinstance(user_calib, dict):
+                CALIB.update(user_calib)
+    except Exception:
+        pass
+
+
+_load_calib()
+
+# CALIB の値を判定で使う定数へ反映（JSONで上書きされた場合も効くように）
+FILL_INNER_SCALE = float(CALIB["fill_inner_scale"])
+FILL_BLANK_MAX   = float(CALIB["fill_blank_max"])
+FILL_DETECT_MIN  = float(CALIB["fill_detect_min"])
+FILL_DIFF_MIN    = float(CALIB["fill_diff_min"])
+FILL_MULTI_MIN   = float(CALIB["fill_multi_min"])
+
+
+def _fill_ratio(thresh_warped: np.ndarray, cx: int, cy: int, r: int) -> float:
+    """中心(cx,cy)・半径rの円内の塗り比率(0..1)を返す共通ヘルパー。"""
+    h, w = thresh_warped.shape[:2]
+    y1 = max(cy - r, 0)
+    y2 = min(cy + r, h)
+    x1 = max(cx - r, 0)
+    x2 = min(cx + r, w)
+    roi = thresh_warped[y1:y2, x1:x2]
+    if roi.size == 0:
+        return 0.0
+    mr = min(r, (x2 - x1) // 2, (y2 - y1) // 2)
+    if mr <= 0:
+        return 0.0
+    mask = np.zeros_like(roi, dtype=np.uint8)
+    cv2.circle(mask, (roi.shape[1] // 2, roi.shape[0] // 2), mr, 255, -1)
+    masked = cv2.bitwise_and(roi, mask)
+    total = cv2.countNonZero(mask)
+    return cv2.countNonZero(masked) / total if total > 0 else 0.0
+
+
+def _best_fill_ratio(thresh_warped: np.ndarray, cx: int, cy: int, r: int) -> float:
+    """中心周辺を ±search_radius_px だけ探索して最大の塗り比率を返す。
+
+    什器固定時に残る数px程度の系統的なズレを吸収する。探索窓はバブル間隔
+    (隣の選択肢まで約30px)より十分小さいため、隣のバブルを誤検出しない。
+    """
+    s = int(CALIB.get("search_radius_px", 0))
+    if s <= 0:
+        return _fill_ratio(thresh_warped, cx, cy, r)
+    best = 0.0
+    step = max(1, s // 2)
+    for dy in range(-s, s + 1, step):
+        for dx in range(-s, s + 1, step):
+            val = _fill_ratio(thresh_warped, cx + dx, cy + dy, r)
+            if val > best:
+                best = val
+    return best
+
+
 # ── Result dataclass ─────────────────────────────────────────────────────────
 
 @dataclass
@@ -215,8 +304,16 @@ def _find_registration_marks(
         solidity = area / hull_area
         if solidity < 0.5:
             continue
-        cx = x + w / 2.0
-        cy = y + h / 2.0
+        # 中心は外接矩形中心ではなく重心(モーメント)で求める。
+        # 斜め撮影で正方形が台形に写った場合、外接矩形中心は真の中心からずれるが、
+        # 重心の方が射影後の中心に近く、warp精度が安定する。
+        m = cv2.moments(cnt)
+        if m["m00"] > 0:
+            cx = m["m10"] / m["m00"]
+            cy = m["m01"] / m["m00"]
+        else:
+            cx = x + w / 2.0
+            cy = y + h / 2.0
         candidates.append((cx, cy, w, h))
 
     if len(candidates) < 4:
@@ -295,8 +392,9 @@ def _bubble_centre_px(row_idx: int, col_idx: int, is_right: bool = False) -> tup
     col_x_pts = _RIGHT_COL_X_PTS if is_right else _LEFT_COL_X_PTS
     img_x = col_x_pts[col_idx]
     img_y = _ROW_Y_PTS[row_idx]
-    px = int(round(img_x * _SX))
-    py = int(round(img_y * _SY))
+    # 什器キャリブの全体オフセットを加える（系統的なズレを一括補正）
+    px = int(round(img_x * _SX)) + int(CALIB.get("offset_dx_px", 0))
+    py = int(round(img_y * _SY)) + int(CALIB.get("offset_dy_px", 0))
     return px, py
 
 
@@ -316,21 +414,7 @@ def _read_column_bubbles(
 
         for c in range(4):
             cx, cy = _bubble_centre_px(row, c, is_right=is_right)
-            y1 = max(cy - r, 0)
-            y2 = min(cy + r, thresh_warped.shape[0])
-            x1 = max(cx - r, 0)
-            x2 = min(cx + r, thresh_warped.shape[1])
-            roi = thresh_warped[y1:y2, x1:x2]
-            if roi.size == 0:
-                continue
-            mask = np.zeros_like(roi, dtype=np.uint8)
-            mr = min(r, (x2 - x1) // 2, (y2 - y1) // 2)
-            cv2.circle(mask, (roi.shape[1] // 2, roi.shape[0] // 2), mr, 255, -1)
-            masked = cv2.bitwise_and(roi, mask)
-            total_pixels = cv2.countNonZero(mask)
-            if total_pixels == 0:
-                continue
-            ratios[c] = cv2.countNonZero(masked) / total_pixels
+            ratios[c] = _best_fill_ratio(thresh_warped, cx, cy, r)
 
         results.append(_judge_row(ratios))
 
@@ -496,17 +580,7 @@ def debug_image(image_base64: str) -> dict:
             row_ratios = [0.0] * 4
             for c in range(4):
                 cx, cy = _bubble_centre_px(row, c, is_right=is_right)
-                y1, y2 = max(cy - r, 0), min(cy + r, thresh_warped.shape[0])
-                x1, x2 = max(cx - r, 0), min(cx + r, thresh_warped.shape[1])
-                roi = thresh_warped[y1:y2, x1:x2]
-                if roi.size == 0:
-                    continue
-                mask = np.zeros_like(roi, dtype=np.uint8)
-                mr = min(r, (x2 - x1) // 2, (y2 - y1) // 2)
-                cv2.circle(mask, (roi.shape[1] // 2, roi.shape[0] // 2), mr, 255, -1)
-                masked = cv2.bitwise_and(roi, mask)
-                total = cv2.countNonZero(mask)
-                row_ratios[c] = cv2.countNonZero(masked) / total if total > 0 else 0.0
+                row_ratios[c] = _best_fill_ratio(thresh_warped, cx, cy, r)
 
             ratios_all.append([round(v, 3) for v in row_ratios])
             answer, status = _judge_row(row_ratios)
@@ -589,7 +663,15 @@ def _detect_marks_strict(thresh, img_h, img_w):
             continue
         if area / hull_area < 0.80:
             continue
-        cands.append((x + w / 2.0, y + h / 2.0, area))
+        # 重心(モーメント)で中心を取る（斜めでも真の中心に近い）
+        m = cv2.moments(cnt)
+        if m["m00"] > 0:
+            mcx = m["m10"] / m["m00"]
+            mcy = m["m01"] / m["m00"]
+        else:
+            mcx = x + w / 2.0
+            mcy = y + h / 2.0
+        cands.append((mcx, mcy, area))
 
     if len(cands) < 4:
         return None
@@ -704,22 +786,10 @@ def process_image(image_base64: str) -> OmrResult:
             for row_idx, (x_list, cy_pt, count) in enumerate(
                 zip(cfg['x_rows'], cfg['y_pts'], cfg['counts'])
             ):
-                cy = int(round(cy_pt * _SY))
+                cy = int(round(cy_pt * _SY)) + int(CALIB.get("offset_dy_px", 0))
                 for col_idx in range(count):
-                    cx = int(round(x_list[col_idx] * _SX))
-                    y1 = max(cy - r, 0)
-                    y2 = min(cy + r, thresh_warped.shape[0])
-                    x1 = max(cx - r, 0)
-                    x2 = min(cx + r, thresh_warped.shape[1])
-                    roi = thresh_warped[y1:y2, x1:x2]
-                    if roi.size == 0:
-                        continue
-                    mask = np.zeros_like(roi, dtype=np.uint8)
-                    mr = min(r, (x2 - x1) // 2, (y2 - y1) // 2)
-                    cv2.circle(mask, (roi.shape[1] // 2, roi.shape[0] // 2), mr, 255, -1)
-                    masked = cv2.bitwise_and(roi, mask)
-                    total = cv2.countNonZero(mask)
-                    ratio = cv2.countNonZero(masked) / total if total > 0 else 0.0
+                    cx = int(round(x_list[col_idx] * _SX)) + int(CALIB.get("offset_dx_px", 0))
+                    ratio = _best_fill_ratio(thresh_warped, cx, cy, r)
                     num = row_idx * cfg['counts'][0] + col_idx + 1
                     if ratio > best_ratio:
                         best_ratio = ratio
